@@ -3,6 +3,9 @@ name: Auto Assign or Migrate Milestone
 on:
   pull_request:
     types: [opened, closed]
+  push:
+   branches:
+    - 'release/**'
 
 jobs:
   assign-or-migrate-milestone:
