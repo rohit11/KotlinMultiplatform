@@ -129,4 +129,4 @@ jobs:
             https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER \
             -d "{\"milestone\": $MILESTONE_ID}"
 
-          echo "✅ Assigned milestone '${{ steps.milestone.outputs.milestone_name }}' to PR #$PR_NUMBER"
+          echo "✅ Assigned milestone  '${{ steps.milestone.outputs.milestone_name }}' to PR #$PR_NUMBER"
