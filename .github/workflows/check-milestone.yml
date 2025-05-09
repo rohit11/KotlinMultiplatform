@@ -1,46 +1,68 @@
-name: Check Milestone on PR
+name: Auto Assign Milestone to PRs
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
-
-  issues:
-    types: [milestoned]
+    types: [opened, closed]
 
 jobs:
-  check-milestone:
-    if: |
-      github.event_name == 'pull_request' ||
-      github.event.issue.pull_request != null
+  assign-milestone:
     runs-on: ubuntu-latest
+    if: |
+      github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' ||
+      github.event.action == 'opened' && startsWith(github.event.pull_request.base.ref, 'release/')
 
     steps:
-      - name: Set PR number based on event type
-        id: set-pr
+      - name: Determine milestone strategy and context
+        id: context
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [[ "${{ github.event.pull_request.merged }}" == "true" && "${{ github.event.pull_request.base.ref }}" == "main" ]]; then
+            echo "🎯 Main branch PR merged."
+            echo "strategy=date" >> $GITHUB_OUTPUT
+            echo "ref_date=${{ github.event.pull_request.merged_at }}" >> $GITHUB_OUTPUT
             echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           else
-            echo "pr_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+            echo "🎯 PR to release/* branch."
+            branch_name="${{ github.event.pull_request.base.ref }}"
+            milestone_name="${branch_name#release/}"
+            echo "strategy=name" >> $GITHUB_OUTPUT
+            echo "milestone_name=$milestone_name" >> $GITHUB_OUTPUT
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Check if milestone is set
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Find matching milestone
+        id: milestone
         run: |
-          PR_NUMBER=${{ steps.set-pr.outputs.pr_number }}
-          echo "🔍 Checking milestone for PR #$PR_NUMBER"
+          milestones=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/milestones?state=open)
 
-          milestone=$(curl -s \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER \
-            | jq '.milestone')
+          STRATEGY="${{ steps.context.outputs.strategy }}"
 
-          if [ "$milestone" = "null" ]; then
-            echo "❌ No milestone set on this pull request."
-            exit 1
+          if [[ "$STRATEGY" == "date" ]]; then
+            REF_DATE="${{ steps.context.outputs.ref_date }}"
+            milestone_id=$(echo "$milestones" | jq -r --arg date "$REF_DATE" '
+              [ .[] | select(.due_on != null and (.due_on >= $date)) ]
+              | sort_by(.due_on)
+              | .[0].number // empty
+            ')
           else
-            title=$(echo "$milestone" | jq -r '.title')
-            echo "✅ Milestone is set: $title"
+            MILESTONE_NAME="${{ steps.context.outputs.milestone_name }}"
+            milestone_id=$(echo "$milestones" | jq -r --arg name "$MILESTONE_NAME" '
+              .[] | select(.title == $name) | .number // empty
+            ')
           fi
+
+          echo "milestone_id=$milestone_id" >> $GITHUB_OUTPUT
+
+      - name: Assign milestone to PR
+        if: steps.milestone.outputs.milestone_id != ''
+        run: |
+          PR_NUMBER=${{ steps.context.outputs.pr_number }}
+          MILESTONE_ID=${{ steps.milestone.outputs.milestone_id }}
+
+          curl -s -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER \
+            -d "{\"milestone\": $MILESTONE_ID}"
+
+          echo "✅ Assigned milestone $MILESTONE_ID to PR #$PR_NUMBER"
