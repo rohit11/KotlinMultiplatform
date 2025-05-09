@@ -4,16 +4,31 @@ on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
+  issues:
+    types: [milestoned]
+
 jobs:
   check-milestone:
+    if: |
+      github.event_name == 'pull_request' ||
+      github.event.issue.pull_request != null
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check if milestone is set on PR
+      - name: Set PR number based on event type
+        id: set-pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "pr_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if milestone is set
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          PR_NUMBER=${{ steps.set-pr.outputs.pr_number }}
           echo "🔍 Checking milestone for PR #$PR_NUMBER"
 
           milestone=$(curl -s \
