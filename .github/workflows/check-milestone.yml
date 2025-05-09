@@ -1,51 +1,50 @@
-name: Auto Assign Milestone to PRs
+name: Auto Assign or Migrate Milestone
 
 on:
   pull_request:
     types: [opened, closed]
 
 jobs:
-  assign-milestone:
+  assign-or-migrate-milestone:
     runs-on: ubuntu-latest
     if: |
       github.event.pull_request.base.ref == 'main' ||
       startsWith(github.event.pull_request.base.ref, 'release/')
 
     steps:
-      - name: 🔍 Debug Event Context
+      - name: Debug Event Context
         run: |
-          echo "Event Action: ${{ github.event.action }}"
-          echo "Base Branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Action: ${{ github.event.action }}"
+          echo "Base: ${{ github.event.pull_request.base.ref }}"
           echo "Merged: ${{ github.event.pull_request.merged }}"
 
-      - name: Determine milestone strategy and context
+      - name: Determine milestone strategy
         id: context
         run: |
-          PR_BRANCH="${{ github.event.pull_request.base.ref }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          branch="${{ github.event.pull_request.base.ref }}"
+          pr_number="${{ github.event.pull_request.number }}"
+          echo "pr_number=$pr_number" >> $GITHUB_OUTPUT
 
-          if [[ "$PR_BRANCH" == "main" ]]; then
+          if [[ "$branch" == "main" ]]; then
             echo "strategy=date" >> $GITHUB_OUTPUT
-
             if [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
               echo "ref_date=${{ github.event.pull_request.merged_at }}" >> $GITHUB_OUTPUT
             else
               echo "ref_date=${{ github.event.pull_request.created_at }}" >> $GITHUB_OUTPUT
             fi
           else
-            milestone_name="${PR_BRANCH#release/}"
+            milestone_name="${branch#release/}"
             echo "strategy=name" >> $GITHUB_OUTPUT
             echo "milestone_name=$milestone_name" >> $GITHUB_OUTPUT
           fi
 
-      - name: Find or Create Matching Milestone
+      - name: Get or Create Milestone
         id: milestone
         run: |
-          TOKEN=${{ secrets.GITHUB_TOKEN }}
           STRATEGY="${{ steps.context.outputs.strategy }}"
           REF_DATE="${{ steps.context.outputs.ref_date }}"
           MILESTONE_NAME="${{ steps.context.outputs.milestone_name }}"
+          TOKEN=${{ secrets.GITHUB_TOKEN }}
 
           milestones=$(curl -s -H "Authorization: Bearer $TOKEN" \
             https://api.github.com/repos/${{ github.repository }}/milestones?state=open)
@@ -61,37 +60,64 @@ jobs:
               | sort_by(.due_on)
               | .[0].title // empty
             ')
-
             if [ -z "$milestone_id" ]; then
-              echo "⚠️ No matching milestone for 'main'. Skipping assignment."
-              echo "skip=true" >> $GITHUB_OUTPUT
-              exit 0
+              milestone_name="temp-unreleased"
+              milestone_id=$(echo "$milestones" | jq -r '.[] | select(.title == "temp-unreleased") | .number // empty')
+              if [ -z "$milestone_id" ]; then
+                echo "🛠 Creating fallback milestone 'temp-unreleased'"
+                due_date=$(date -u -d "+7 days" '+%Y-%m-%dT00:00:00Z')
+                response=$(curl -s -X POST \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  https://api.github.com/repos/${{ github.repository }}/milestones \
+                  -d "{\"title\":\"temp-unreleased\",\"state\":\"open\",\"due_on\":\"$due_date\"}")
+                milestone_id=$(echo "$response" | jq -r '.number')
+              fi
             fi
           else
             milestone_id=$(echo "$milestones" | jq -r --arg name "$MILESTONE_NAME" '
               .[] | select(.title == $name) | .number // empty
             ')
             if [ -z "$milestone_id" ]; then
-              echo "⚠️ Milestone '$MILESTONE_NAME' not found. Creating it..."
               due_date=$(date -u -d "+7 days" '+%Y-%m-%dT00:00:00Z')
+              echo "🛠 Creating milestone $MILESTONE_NAME"
               response=$(curl -s -X POST \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 https://api.github.com/repos/${{ github.repository }}/milestones \
                 -d "{\"title\":\"$MILESTONE_NAME\",\"state\":\"open\",\"due_on\":\"$due_date\"}")
               milestone_id=$(echo "$response" | jq -r '.number')
-              echo "✅ Created milestone $MILESTONE_NAME with ID $milestone_id"
-            else
-              echo "✅ Found existing milestone $MILESTONE_NAME with ID $milestone_id"
+            fi
+
+            # 🔄 Migrate PRs from temp-unreleased to new milestone
+            temp_id=$(echo "$milestones" | jq -r '.[] | select(.title == "temp-unreleased") | .number // empty')
+            if [ -n "$temp_id" ]; then
+              prs=$(curl -s -H "Authorization: Bearer $TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/issues?milestone=$temp_id&state=all")
+              echo "$prs" | jq -r '.[].number' | while read pr; do
+                echo "↪ Reassigning PR #$pr to milestone $MILESTONE_NAME"
+                curl -s -X PATCH \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  https://api.github.com/repos/${{ github.repository }}/issues/$pr \
+                  -d "{\"milestone\": $milestone_id}"
+              done
+
+              # 🧹 Delete the temp milestone
+              curl -s -X PATCH \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/${{ github.repository }}/milestones/$temp_id \
+                -d '{"state": "closed"}'
+              echo "🧹 Closed temp-unreleased milestone"
             fi
           fi
 
           echo "milestone_id=$milestone_id" >> $GITHUB_OUTPUT
           echo "milestone_name=$milestone_name" >> $GITHUB_OUTPUT
-          echo "skip=false" >> $GITHUB_OUTPUT
 
-      - name: Assign milestone to PR
-        if: steps.milestone.outputs.skip != 'true' && steps.milestone.outputs.milestone_id != ''
+      - name: Assign Milestone to PR
+        if: steps.milestone.outputs.milestone_id != ''
         run: |
           PR_NUMBER=${{ steps.context.outputs.pr_number }}
           MILESTONE_ID=${{ steps.milestone.outputs.milestone_id }}
