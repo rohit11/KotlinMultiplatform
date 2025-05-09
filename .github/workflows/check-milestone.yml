@@ -4,8 +4,8 @@ on:
   pull_request:
     types: [opened, closed]
   push:
-   branches:
-    - 'release/**'
+    branches:
+      - 'release/**'
 
 jobs:
   assign-or-migrate-milestone:
@@ -49,8 +49,7 @@ jobs:
           MILESTONE_NAME="${{ steps.context.outputs.milestone_name }}"
           TOKEN=${{ secrets.GITHUB_TOKEN }}
 
-          milestones=$(curl -s -H "Authorization: Bearer $TOKEN" \
-            https://api.github.com/repos/${{ github.repository }}/milestones?state=open)
+          milestones=$(curl -s -H "Authorization: Bearer $TOKEN"             https://api.github.com/repos/${{ github.repository }}/milestones?state=open)
 
           if [[ "$STRATEGY" == "date" ]]; then
             milestone_id=$(echo "$milestones" | jq -r --arg date "$REF_DATE" '
@@ -69,11 +68,7 @@ jobs:
               if [ -z "$milestone_id" ]; then
                 echo "🛠 Creating fallback milestone 'temp-unreleased'"
                 due_date=$(date -u -d "+7 days" '+%Y-%m-%dT00:00:00Z')
-                response=$(curl -s -X POST \
-                  -H "Authorization: Bearer $TOKEN" \
-                  -H "Accept: application/vnd.github+json" \
-                  https://api.github.com/repos/${{ github.repository }}/milestones \
-                  -d "{\"title\":\"temp-unreleased\",\"state\":\"open\",\"due_on\":\"$due_date\"}")
+                response=$(curl -s -X POST                   -H "Authorization: Bearer $TOKEN"                   -H "Accept: application/vnd.github+json"                   https://api.github.com/repos/${{ github.repository }}/milestones                   -d "{"title":"temp-unreleased","state":"open","due_on":"$due_date"}")
                 milestone_id=$(echo "$response" | jq -r '.number')
               fi
             fi
@@ -82,37 +77,35 @@ jobs:
               .[] | select(.title == $name) | .number // empty
             ')
             if [ -z "$milestone_id" ]; then
-              due_date=$(date -u -d "+7 days" '+%Y-%m-%dT00:00:00Z')
+              if [[ "$MILESTONE_NAME" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                due_date="${MILESTONE_NAME}T00:00:00Z"
+              else
+                due_date=$(date -u -d "+7 days" '+%Y-%m-%dT00:00:00Z')
+              fi
+
               echo "🛠 Creating milestone $MILESTONE_NAME"
-              response=$(curl -s -X POST \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                https://api.github.com/repos/${{ github.repository }}/milestones \
-                -d "{\"title\":\"$MILESTONE_NAME\",\"state\":\"open\",\"due_on\":\"$due_date\"}")
+              response=$(curl -s -X POST                 -H "Authorization: Bearer $TOKEN"                 -H "Accept: application/vnd.github+json"                 https://api.github.com/repos/${{ github.repository }}/milestones                 -d "{"title":"$MILESTONE_NAME","state":"open","due_on":"$due_date"}")
               milestone_id=$(echo "$response" | jq -r '.number')
             fi
 
-            # 🔄 Migrate PRs from temp-unreleased to new milestone
             temp_id=$(echo "$milestones" | jq -r '.[] | select(.title == "temp-unreleased") | .number // empty')
             if [ -n "$temp_id" ]; then
-              prs=$(curl -s -H "Authorization: Bearer $TOKEN" \
-                "https://api.github.com/repos/${{ github.repository }}/issues?milestone=$temp_id&state=all")
-              echo "$prs" | jq -r '.[].number' | while read pr; do
-                echo "↪ Reassigning PR #$pr to milestone $MILESTONE_NAME"
-                curl -s -X PATCH \
-                  -H "Authorization: Bearer $TOKEN" \
-                  -H "Accept: application/vnd.github+json" \
-                  https://api.github.com/repos/${{ github.repository }}/issues/$pr \
-                  -d "{\"milestone\": $milestone_id}"
+              prs=$(curl -s -H "Authorization: Bearer $TOKEN"                 "https://api.github.com/repos/${{ github.repository }}/issues?milestone=$temp_id&state=all")
+
+              echo "$prs" | jq -c '.[]' | while read pr; do
+                pr_number=$(echo "$pr" | jq -r '.number')
+                pr_date=$(echo "$pr" | jq -r '.pull_request.merged_at // .created_at')
+                if [[ "$pr_date" < "$due_date" ]]; then
+                  echo "↪ Reassigning PR #$pr_number (merged/created at $pr_date) to milestone $MILESTONE_NAME"
+                  curl -s -X PATCH                     -H "Authorization: Bearer $TOKEN"                     -H "Accept: application/vnd.github+json"                     https://api.github.com/repos/${{ github.repository }}/issues/$pr_number                     -d "{"milestone": $milestone_id}"
+                fi
               done
 
-              # 🧹 Delete the temp milestone
-              curl -s -X PATCH \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                https://api.github.com/repos/${{ github.repository }}/milestones/$temp_id \
-                -d '{"state": "closed"}'
-              echo "🧹 Closed temp-unreleased milestone"
+              remaining=$(curl -s -H "Authorization: Bearer $TOKEN"                 "https://api.github.com/repos/${{ github.repository }}/issues?milestone=$temp_id&state=all" | jq 'length')
+              if [ "$remaining" -eq 0 ]; then
+                curl -s -X PATCH                   -H "Authorization: Bearer $TOKEN"                   -H "Accept: application/vnd.github+json"                   https://api.github.com/repos/${{ github.repository }}/milestones/$temp_id                   -d '{"state": "closed"}'
+                echo "🧹 Closed empty temp-unreleased milestone"
+              fi
             fi
           fi
 
@@ -126,10 +119,6 @@ jobs:
           MILESTONE_ID=${{ steps.milestone.outputs.milestone_id }}
           TOKEN=${{ secrets.GITHUB_TOKEN }}
 
-          curl -s -X PATCH \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER \
-            -d "{\"milestone\": $MILESTONE_ID}"
+          curl -s -X PATCH             -H "Authorization: Bearer $TOKEN"             -H "Accept: application/vnd.github+json"             https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER             -d "{"milestone": $MILESTONE_ID}"
 
-          echo "✅ Assigned milestone  '${{ steps.milestone.outputs.milestone_name }}' to PR #$PR_NUMBER"
+          echo "✅ Assigned milestone '${{ steps.milestone.outputs.milestone_name }}' to PR #$PR_NUMBER"
