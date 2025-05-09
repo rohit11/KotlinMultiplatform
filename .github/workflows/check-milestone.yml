@@ -8,26 +8,30 @@ jobs:
   assign-milestone:
     runs-on: ubuntu-latest
     if: |
-      github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' ||
-      github.event.action == 'opened' && startsWith(github.event.pull_request.base.ref, 'release/')
+      (github.event.pull_request.base.ref == 'main' &&
+       (github.event.pull_request.merged == true || github.event.action == 'opened')) ||
+      (startsWith(github.event.pull_request.base.ref, 'release/'))
 
     steps:
+      - name: 🔍 Debug Event Context
+        run: |
+          echo "Event Action: ${{ github.event.action }}"
+          echo "Base Branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Merged: ${{ github.event.pull_request.merged }}"
+
       - name: Determine milestone strategy and context
         id: context
         run: |
-          if [[ "${{ github.event.pull_request.merged }}" == "true" && "${{ github.event.pull_request.base.ref }}" == "main" ]]; then
-            echo "🎯 Main branch PR merged."
+          if [[ "${{ github.event.pull_request.base.ref }}" == "main" ]]; then
             echo "strategy=date" >> $GITHUB_OUTPUT
-            echo "ref_date=${{ github.event.pull_request.merged_at }}" >> $GITHUB_OUTPUT
-            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "ref_date=${{ github.event.pull_request.merged_at || github.event.pull_request.created_at }}" >> $GITHUB_OUTPUT
           else
-            echo "🎯 PR to release/* branch."
             branch_name="${{ github.event.pull_request.base.ref }}"
             milestone_name="${branch_name#release/}"
             echo "strategy=name" >> $GITHUB_OUTPUT
             echo "milestone_name=$milestone_name" >> $GITHUB_OUTPUT
-            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           fi
+          echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
 
       - name: Find or Create Matching Milestone
         id: milestone
