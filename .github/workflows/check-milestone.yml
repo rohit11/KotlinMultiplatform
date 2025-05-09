@@ -29,40 +29,65 @@ jobs:
             echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Find matching milestone
+      - name: Find or Create Matching Milestone
         id: milestone
         run: |
-          milestones=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          TOKEN=${{ secrets.GITHUB_TOKEN }}
+          STRATEGY="${{ steps.context.outputs.strategy }}"
+          REF_DATE="${{ steps.context.outputs.ref_date }}"
+          MILESTONE_NAME="${{ steps.context.outputs.milestone_name }}"
+
+          milestones=$(curl -s -H "Authorization: Bearer $TOKEN" \
             https://api.github.com/repos/${{ github.repository }}/milestones?state=open)
 
-          STRATEGY="${{ steps.context.outputs.strategy }}"
-
           if [[ "$STRATEGY" == "date" ]]; then
-            REF_DATE="${{ steps.context.outputs.ref_date }}"
             milestone_id=$(echo "$milestones" | jq -r --arg date "$REF_DATE" '
               [ .[] | select(.due_on != null and (.due_on >= $date)) ]
               | sort_by(.due_on)
               | .[0].number // empty
             ')
+            milestone_name=$(echo "$milestones" | jq -r --arg date "$REF_DATE" '
+              [ .[] | select(.due_on != null and (.due_on >= $date)) ]
+              | sort_by(.due_on)
+              | .[0].title // empty
+            ')
           else
-            MILESTONE_NAME="${{ steps.context.outputs.milestone_name }}"
             milestone_id=$(echo "$milestones" | jq -r --arg name "$MILESTONE_NAME" '
               .[] | select(.title == $name) | .number // empty
             ')
+            milestone_name="$MILESTONE_NAME"
+          fi
+
+          if [ -z "$milestone_id" ]; then
+            echo "⚠️ Milestone not found. Creating new milestone: $milestone_name"
+            due_date=$(date -u -d "+7 days" '+%Y-%m-%dT00:00:00Z')
+
+            response=$(curl -s -X POST \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/${{ github.repository }}/milestones \
+              -d "{\"title\":\"$milestone_name\",\"state\":\"open\",\"due_on\":\"$due_date\"}")
+
+            milestone_id=$(echo "$response" | jq -r '.number')
+            echo "✅ Created milestone $milestone_name with ID $milestone_id"
+          else
+            echo "✅ Found existing milestone $milestone_name with ID $milestone_id"
           fi
 
           echo "milestone_id=$milestone_id" >> $GITHUB_OUTPUT
+          echo "milestone_name=$milestone_name" >> $GITHUB_OUTPUT
 
       - name: Assign milestone to PR
         if: steps.milestone.outputs.milestone_id != ''
         run: |
           PR_NUMBER=${{ steps.context.outputs.pr_number }}
           MILESTONE_ID=${{ steps.milestone.outputs.milestone_id }}
+          TOKEN=${{ secrets.GITHUB_TOKEN }}
 
           curl -s -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER \
             -d "{\"milestone\": $MILESTONE_ID}"
 
-          echo "✅ Assigned milestone $MILESTONE_ID to PR #$PR_NUMBER"
+          echo "✅ Assigned milestone '${{ steps.milestone.outputs.milestone_name }}' to PR #$PR_NUMBER"
